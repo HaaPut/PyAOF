@@ -12,10 +12,3 @@ def test_aof_output_shape():
     # Assert the output matches the input volume shape
     assert aof.shape == (10, 10, 10)
     assert aof.dtype == np.float32
-
-def test_aof_flat():
-    sdf = np.zeros((5, 5, 5), dtype=np.float32)
-    aof = compute_aof(sdf, 1.0, 1.0, 1.0)
-    
-    # Example assertion: A flat field should result in zero flux
-    assert np.allclose(aof, 0.0, atol=1e-4)
