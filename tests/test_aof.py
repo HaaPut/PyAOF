@@ -39,7 +39,7 @@ def test_aof_flat():
 
 def test_aof_range():
 
-    volume = np.random.rand((32, 32, 32), dtype=np.float32)
+    volume = np.random.rand(32, 32, 32)
     
     aof_map = compute_aof(volume)
     
