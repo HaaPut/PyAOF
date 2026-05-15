@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyaof"
+version = "0.1.2"
+authors = [
+  { name="Tabish Syed", email="tabish.syed@mail.mcgill.ca" },
+]
+description = "Python library for computing Average Outward Flux (AOF)."
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT" 
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "numpy",
+    "scipy",
+    "vtk",
+    "itk",
+    "warp-lang",
+    "matplotlib",
+]
+
+# Optional dependencies for visualization
+[project.optional-dependencies]
+viz = [
+    "matplotlib",
+    "polyscope"
+]
+test = [
+    "pytest",
+    "pytest-cov"
+]
+
+docs = [
+    "mkdocs",
+    "mkdocs-material",
+    "mkdocstrings[python]",
+    "mike",
+]
+
+all = [
+    "pyaof[viz,test,docs]"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/haaput/PyAOF"
+"Bug Tracker" = "https://github.com/haaput/PyAOF/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pyaof"]
+exclude = ["data", "examples","images","docs"]

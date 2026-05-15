@@ -1,0 +1,60 @@
+site_name: PyAOF
+site_description: Documentation for PyAOF — Average Outward Flux and Signed Distance Fields
+site_author: Tabish Syed
+site_url: https://haaput.github.io/pyaof
+repo_url: https://github.com/haaput/pyaof
+
+docs_dir: docs
+site_dir: site
+
+# ---------------------------------------------------------
+# Theme
+# ---------------------------------------------------------
+theme:
+  name: material
+  features:
+    - header.autohide
+    - navigation.footer
+    - navigation.tracking
+    - content.code.copy
+  palette:
+    # Light mode
+    - scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    # Dark mode
+    - scheme: slate
+      media: "(prefers-color-scheme: dark)"
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+  logo: assets/aof-spokes.png
+
+
+# ---------------------------------------------------------
+# Plugins (Including API Docs)
+# ---------------------------------------------------------
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            inherited_members: true
+            show_source: false
+  # Required for the 'mike' version provider
+  - mike:
+      alias_type: symlink
+
+
+# --------------------------------------------------------
+# Structure
+# --------------------------------------------------------
+
+nav:
+  - Home: index.md
+  - API Reference: api.md
