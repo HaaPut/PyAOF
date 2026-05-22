@@ -48,4 +48,12 @@ Automatically generated documentation for core functions in `pyaof` library.
       show_root_heading: true
       show_source: true
 
+
+### Visualize 360 rotation
+
+::: pyaof.util.render_360_rotation
+    options:
+      show_root_heading: true
+      show_source: false
+
 ---
