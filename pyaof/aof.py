@@ -1,5 +1,6 @@
 import numpy as np
 import warp as wp
+import itertools
 from .st import structure_tensor_3d, eig_special_3d
 
 
@@ -274,7 +275,7 @@ def _block_aof(sdf_np, offsets, hx=1.0, hy=1.0, hz=1.0):
     Computes the Average Outward Flux (AOF) map for a block of 3D Signed Distance Field.
     Args:
         sdf_np (ndarray): 
-            A 3D/2D NumPy array (Z, Y, X) representing the Signed Distance Field 
+            A 3D/2D NumPy array representing the Signed Distance Field 
             or intensity volume.
     Returns:
         aof (ndarray): 
@@ -297,11 +298,11 @@ def _block_aof(sdf_np, offsets, hx=1.0, hy=1.0, hz=1.0):
         wp.launch(
             kernel=aof_kernel_2d,
             dim=sdf_gpu.shape,
-            inputs=[sdf_gpu, aof_gpu, offsets,
+            inputs=[sdf_gpu, aof_gpu,
                     hx,hy,]
         )
     else:
-        print(f"Unsported dimension {len(sdf_np.shape)}. Only 2,3 is supported")
+        raise ValueError(f"Expected a 2D or 3D array, but got {sdf_np.ndim}D.")
 
     wp.synchronize()
 
@@ -312,45 +313,58 @@ def _block_aof(sdf_np, offsets, hx=1.0, hy=1.0, hz=1.0):
 
 def quick_aof(sdf_np:np.ndarray, hx = 1.0, hy=1.0, hz=1.0, tile_size=128, halo=2)->np.ndarray:
     """
-    Computes the Average Outward Flux (AOF) map for 3D Signed Distance volume.  
+    Computes the Average Outward Flux (AOF) map for a 2D or 3D Signed Distance volume.  
 
     Args:
         sdf_np (ndarray): 
-            A 3D/2D NumPy array (Z, Y, X) representing the Signed Distance Field 
+            A 3D (Z, Y, X) or 2D (Y, X) NumPy array representing the Signed Distance Field 
             or intensity volume.
     Returns:
         aof (ndarray): 
-            A 3D/2D NumPy array of the same shape as 'sdf_np'.
+            A NumPy array of the same shape as 'sdf_np'.
     """
-    
-    depth, height, width = sdf_np.shape
+    ndim = sdf_np.ndim
+    if ndim not in (2, 3):
+        raise ValueError(f"Expected a 2D or 3D array, but got {ndim}D.")
+
     aof_full = np.zeros_like(sdf_np)
 
-    OFFSET_DATA = sample_sphere_points(128)
-    offsets = wp.array(OFFSET_DATA, dtype=wp.vec3)
+    if ndim == 3:
+        OFFSET_DATA = sample_sphere_points(128)
+        offsets = wp.array(OFFSET_DATA, dtype=wp.vec3)
+        kwargs = {'hx': hx, 'hy': hy, 'hz': hz}
+    else:
+        offsets = None # TODO: use circle sampling
+        kwargs = {'hx': hx, 'hy': hy}
 
-    # Iterate through the volume in chunks
-    for z in range(0, depth, tile_size):
-        for y in range(0, height, tile_size):
-            for x in range(0, width, tile_size):
-                
-                # Actual Core bounds we want to fill
-                z_end, y_end, x_end = min(z + tile_size, depth), min(y + tile_size, height), min(x + tile_size, width)
+    # Build ranges for each dimension
+    ranges = [range(0, dim_size, tile_size) for dim_size in sdf_np.shape]
 
-                # Pad with halo to be discarded later if possible...
-                z0_h, z1_h = max(z - halo, 0), min(z_end + halo, depth)
-                y0_h, y1_h = max(y - halo, 0), min(y_end + halo, height)
-                x0_h, x1_h = max(x - halo, 0), min(x_end + halo, width)
+    for coords in itertools.product(*ranges):
+        
+        # Calculate Core bounds we want to fill
+        ends = [min(c + tile_size, dim_size) for c, dim_size in zip(coords, sdf_np.shape)]
 
-                tile_sdf = sdf_np[z0_h:z1_h, y0_h:y1_h, x0_h:x1_h]
+        # Calculate halo-padded bounds
+        halo_starts = [max(c - halo, 0) for c in coords]
+        halo_ends = [min(e + halo, dim_size) for e, dim_size in zip(ends, sdf_np.shape)]
 
-                tile_aof_processed = _block_aof(tile_sdf, offsets, hx=hx,hy=hy,hz=hz)
+        # Extract tile with halo using dynamic N-dimensional slicing
+        slices_halo = tuple(slice(hs, he) for hs, he in zip(halo_starts, halo_ends))
+        tile_sdf = sdf_np[slices_halo]
 
-                dz0, dy0, dx0 = z - z0_h, y - y0_h, x - x0_h
-                dz1, dy1, dx1 = dz0 + (z_end - z), dy0 + (y_end - y), dx0 + (x_end - x)
+        # Process the tile
+        tile_aof_processed = _block_aof(tile_sdf, offsets, **kwargs)
 
-                # Paste "Core" region into the final result
-                aof_full[z:z_end, y:y_end, x:x_end] = tile_aof_processed[dz0:dz1, dy0:dy1, dx0:dx1]
+        # Calculate local indices for pasting the "Core" region
+        local_starts = [c - hs for c, hs in zip(coords, halo_starts)]
+        local_ends = [ls + (e - c) for ls, e, c in zip(local_starts, ends, coords)]
+
+        slices_local = tuple(slice(ls, le) for ls, le in zip(local_starts, local_ends))
+        slices_core = tuple(slice(c, e) for c, e in zip(coords, ends))
+
+        # Paste core into the final result
+        aof_full[slices_core] = tile_aof_processed[slices_local]
 
     return aof_full
 
@@ -399,6 +413,44 @@ def threshold_local_max(
     else:
         output[i, j, k] = val
 
+@wp.kernel
+def threshold_local_max_2d(
+    input: wp.array(dtype=float, ndim=2),
+    output: wp.array(dtype=float, ndim=2),
+    N: int,
+    fraction: float,
+):
+    i, j = wp.tid()
+
+    nx = input.shape[0]
+    ny = input.shape[1]
+
+    half_n = N // 2
+
+    # Compute local max in k x k neighborhood
+    local_max = float(-1e5)
+
+    for di in range(-half_n, half_n + 1):
+        for dj in range(-half_n, half_n + 1):
+            ni = i + di
+            nj = j + dj
+
+            # boundary check
+            if (ni >= 0 and ni < nx and
+                nj >= 0 and nj < ny):
+
+                val = input[ni, nj]
+                if val > local_max:
+                    local_max = val
+
+    val = input[i, j]
+
+    # Apply threshold
+    if val < fraction * local_max:
+        output[i, j] = 0.0
+    else:
+        output[i, j] = val
+
 
 def nonmax_supp(vol: np.ndarray,*,window_size=3, fraction=0.7)->np.ndarray:
     """Perform local non-maximum suppression on a 3D volume.
@@ -412,7 +464,7 @@ def nonmax_supp(vol: np.ndarray,*,window_size=3, fraction=0.7)->np.ndarray:
 
     Args:
         vol (np.ndarray):
-            Input 3D volume array.
+            Input 2D/3D volume array.
 
         window_size (int, optional):
             Size of the cubic local neighborhood used to compute local
@@ -441,11 +493,22 @@ def nonmax_supp(vol: np.ndarray,*,window_size=3, fraction=0.7)->np.ndarray:
     vol_gpu = wp.from_numpy(vol, dtype=float)
     out_gpu = wp.zeros_like(vol_gpu)
 
-    wp.launch(
-        threshold_local_max,
-        dim=vol_gpu.shape,
-        inputs=[vol_gpu, out_gpu, window_size, fraction]
-    )
+    if len(vol.shape) == 3:
+        wp.launch(
+            threshold_local_max,
+            dim=vol_gpu.shape,
+            inputs=[vol_gpu, out_gpu, window_size, fraction]
+        )
+    elif len(vol.shape) == 2:
+        wp.launch(
+            threshold_local_max_2d,
+            dim=vol_gpu.shape,
+            inputs=[vol_gpu, out_gpu, window_size, fraction]
+        )
+    else:
+        print(f"[Warning]: Unsupported input shape {vol.shape}.")
+        wp.copy(dest = out_gpu,
+                src = vol_gpu)
     
     wp.synchronize()
 
@@ -461,7 +524,7 @@ def compute_aof(sdf_np: np.ndarray, hx = 1.0, hy=1.0, hz=1.0, tile_size=128, hal
 
     Args:
         sdf_np (np.ndarray):
-            Input Signed Distance Field (SDF) volume as a 3D NumPy array.
+            Input Signed Distance Field (SDF) volume as a 2D/3D NumPy array.
 
         hx (float, optional):
             Grid spacing along the x-axis. Defaults to ``1.0``.
