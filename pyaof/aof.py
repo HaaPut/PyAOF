@@ -4,7 +4,49 @@ import itertools
 from .st import structure_tensor_3d, eig_special_3d
 
 
-def sample_sphere_points(n_points:int, *, dimension=3, iterations=50)->np.ndarray:
+def fibonacci_points(n_points: int, *, dimension: int = 3) -> tuple[np.ndarray, np.ndarray]:
+    """Generates an equal-weight Fibonacci lattice for a 2D unit circle disk or 3D unit sphere surface.
+
+    Args:
+        n_points (int):
+            Number of points to generate.
+
+        dimension (int, optional):
+            Dimensionality of the target space. Defaults to ``3``.
+
+            - ``dimension=2`` generates points inside a 2D unit circle disk.
+            - ``dimension=3`` generates points on a 3D unit sphere surface.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]:
+            - **pts** (np.ndarray): Array of shape ``(n_points, dimension)`` containing
+              point coordinates.
+    """
+    if dimension not in (2, 3):
+        raise ValueError("Dimension must be either 2 or 3.")
+
+    if dimension == 2:
+        angles = np.linspace(0.0, 2.0 * np.pi, n_points, endpoint=False)
+        x = np.cos(angles)
+        y = np.sin(angles)
+        pts = np.column_stack((x, y))
+
+    elif dimension == 3:
+        # Equal area height-slicing on 3D sphere surface
+        golden_ratio = (1.0 + np.sqrt(5.0)) / 2.0
+        i = np.arange(0, n_points, dtype=float) + 0.5
+        theta = 2.0 * np.pi * i / golden_ratio
+        phi = np.arccos(1.0 - 2.0 * i / n_points) 
+        
+        x = np.cos(theta) * np.sin(phi)
+        y = np.sin(theta) * np.sin(phi)
+        z = np.cos(phi)
+        pts = np.column_stack((x, y, z))
+
+    return pts
+
+
+def sample_sphere_points(n_points:int, *, dimension=3, iterations=500)->np.ndarray:
     """Generate approximately uniform points on a unit sphere.
     This function generates points on the surface of a unit sphere using
     an iterative electrostatic repulsion method. Points are initialized
@@ -26,7 +68,7 @@ def sample_sphere_points(n_points:int, *, dimension=3, iterations=50)->np.ndarra
 
         iterations (int, optional):
             Number of relaxation iterations used to improve point
-            distribution. Defaults to ``50``.
+            distribution. Defaults to ``500``.
 
     Returns:
         np.ndarray:
@@ -66,6 +108,28 @@ def sample_sphere_points(n_points:int, *, dimension=3, iterations=50)->np.ndarra
 
     return dirs
 
+
+@wp.func
+def interp2d(sdf: wp.array2d(dtype=float),
+              x: float, y: float) -> float:
+    i = int(wp.floor(x))
+    j = int(wp.floor(y))
+
+    tx = x - float(i)
+    ty = y - float(j)
+
+    # Sample four neighboring grid points
+    c00 = sdf[i,     j    ]
+    c10 = sdf[i + 1, j    ]
+    c01 = sdf[i,     j + 1]
+    c11 = sdf[i + 1, j + 1]
+
+    # Bilinear interpolation
+    return wp.lerp(
+        wp.lerp(c00, c10, tx),
+        wp.lerp(c01, c11, tx),
+        ty
+    )
 
 @wp.func
 def interp(sdf: wp.array3d(dtype=float),
@@ -173,6 +237,39 @@ def spherical_aof_stencil(
     return sum_flux / float(N)
 
 
+@wp.func
+def circular_aof_stencil(
+    sdf: wp.array2d(dtype=float),
+    offsets: wp.array(dtype=wp.vec2),
+    i: float, j: float, 
+    hx:float, hy:float,
+) -> float:
+    eps = 1e-9
+    N = offsets.shape[0]
+    radius = 1.0
+    dx, dy = hx*radius, hy*radius
+
+    sum_flux = float(0.0)
+    for n in range(N):
+        offset = offsets[n]
+        nx = radius*float(offset[0])
+        ny = radius*float(offset[1])
+        x, y = i+nx, j+ny
+
+        gx = (interp2d(sdf, x+dx, y) - interp2d(sdf, x-dx, y))/(2.0*dx)
+        gy = (interp2d(sdf, x, y+dy) - interp2d(sdf, x, y-dy))/(2.0*dy)
+        
+        # Normalize
+        grad_mag = wp.max( wp.sqrt(gx*gx + gy*gy), eps )
+        n_mag = wp.sqrt(nx*nx + ny*ny)
+        
+        proj_grad = 0.0
+        proj_grad += (gx/grad_mag) * (nx/n_mag)
+        proj_grad += (gy/grad_mag) * (ny/n_mag)
+        
+        sum_flux += proj_grad
+        
+    return sum_flux / float(N)
 
 
 @wp.kernel
@@ -203,21 +300,21 @@ def aof_kernel_3d(
 def aof_kernel_2d(
     sdf: wp.array2d(dtype=float),
     aof: wp.array2d(dtype=float),
+    offsets: wp.array(dtype=wp.vec2),
     hx:float, hy:float,
 ):
-    # Warp automatically unpacks 3D launch dimensions
     i, j = wp.tid()
-    #nx,ny,nz = sdf.shape
     nx = sdf.shape[0]
     ny = sdf.shape[1]
     
     # Skip borders to prevent out-of-bounds access
     if i <= 0 or j <= 0 or i >= nx-1 or j >= ny-1:
         return
-    aof[i, j] = aof_stencil_2d(sdf,
-                              i, j,
-                              hx,hy,
-                            )
+    aof[i, j] = circular_aof_stencil(sdf,
+                                     offsets,
+                                     float(i), float(j),
+                                     hx,hy,
+                                    )
 
 
 def get_tangents(aof, sigma=2, rho=1.5, aof_threshold = 0.3, return_sparse=True, *,
@@ -298,7 +395,7 @@ def _block_aof(sdf_np, offsets, hx=1.0, hy=1.0, hz=1.0):
         wp.launch(
             kernel=aof_kernel_2d,
             dim=sdf_gpu.shape,
-            inputs=[sdf_gpu, aof_gpu,
+            inputs=[sdf_gpu, aof_gpu, offsets,
                     hx,hy,]
         )
     else:
@@ -330,11 +427,12 @@ def quick_aof(sdf_np:np.ndarray, hx = 1.0, hy=1.0, hz=1.0, tile_size=128, halo=2
     aof_full = np.zeros_like(sdf_np)
 
     if ndim == 3:
-        OFFSET_DATA = sample_sphere_points(128)
+        OFFSET_DATA = fibonacci_points(128)
         offsets = wp.array(OFFSET_DATA, dtype=wp.vec3)
         kwargs = {'hx': hx, 'hy': hy, 'hz': hz}
     else:
-        offsets = None # TODO: use circle sampling
+        OFFSET_DATA = fibonacci_points(n_points=32, dimension=2)
+        offsets = wp.array(OFFSET_DATA, dtype=wp.vec2)
         kwargs = {'hx': hx, 'hy': hy}
 
     # Build ranges for each dimension
